@@ -1,7 +1,7 @@
 // テイク 1 回の進行（§7.1）と、ループバック試験の実行（§12.1）。
 import Core from "../core/solfege-core.js";
 import type { Exercise } from "../core/exercise.ts";
-import { analyzeTake, scheduleTake } from "../judge/take.ts";
+import { analyzeTake, MIC_SETTLE_SEC, scheduleTake } from "../judge/take.ts";
 import type { TakeAnalysis, TakeSchedule } from "../judge/take.ts";
 import type { Settings } from "../storage.ts";
 import { makeConfig } from "./config.ts";
@@ -24,6 +24,8 @@ export interface TakeOutcome {
   gaps: number;
   /** 実効サンプルレートの自己点検（判定できていなければ null） */
   rateCheck: RateCheck | null;
+  /** 届いた音がすべて無音（マイクがミュートされていた、など）。記録しない */
+  silentInput: boolean;
 }
 
 export interface TakeHandle {
@@ -40,6 +42,10 @@ export interface TakeHandle {
 const STOP_TIMEOUT_MS = 600;
 /** T_end を過ぎてもフレームが届かないとき、これだけ待って打ち切る */
 const END_GRACE_SEC = 1.0;
+/** フレームが T_end のこれより手前で止まっていたら、録音が途中で止まったとみなす */
+const TRUNCATED_SEC = 0.5;
+/** これ以下の音量しか無いフレームは、マイクからの入力が無い（デジタルの無音）とみなす */
+const DIGITAL_SILENCE_DB = -90;
 
 function playSchedule(engine: AudioEngine, group: PlayGroup, s: TakeSchedule, chordNotes: readonly number[], clicksDuringTake: boolean): void {
   if (s.tChord !== null) engine.chord(group, chordNotes, s.tChord);
@@ -59,6 +65,9 @@ export function chordNotes(exercise: Exercise, octaveDown: boolean): number[] {
  */
 export function startTake(engine: AudioEngine, exercise: Exercise, bpm: number, settings: Settings): TakeHandle {
   const ctx = engine.ensureContext();
+  cancelLoopbackTest();
+  // いまマイクを開くなら、音の経路が落ち着くまで少し待ってから鳴らし始める（iOS は開いた直後に出力が乱れる）
+  const settleSec = engine.micState === "open" ? 0 : MIC_SETTLE_SEC;
   const micReady = engine.openMic();
   void keepAwake(true);
 
@@ -78,7 +87,10 @@ export function startTake(engine: AudioEngine, exercise: Exercise, bpm: number, 
   let resolveScheduled: (s: TakeSchedule | null) => void = () => { /* 下で差し替える */ };
   const scheduled = new Promise<TakeSchedule | null>((resolve) => { resolveScheduled = resolve; });
 
+  let cleaned = false;
   const cleanup = () => {
+    if (cleaned) return; // 2 回目で、次のテイクが持っている Wake Lock を放さない
+    cleaned = true;
     unsubscribe?.();
     unsubscribe = null;
     unwatchMic?.();
@@ -132,7 +144,7 @@ export function startTake(engine: AudioEngine, exercise: Exercise, bpm: number, 
       finish?.();
     });
 
-    const schedule = scheduleTake(ctx.currentTime, exercise.melody, bpm, { chord: settings.chordBeforeTake });
+    const schedule = scheduleTake(ctx.currentTime + settleSec, exercise.melody, bpm, { chord: settings.chordBeforeTake });
     group = engine.newGroup();
     playSchedule(engine, group, schedule, chordNotes(exercise, settings.playbackOctaveDown), settings.clicksDuringTake);
     endTimer = setTimeout(() => finish?.(), (schedule.tEnd - ctx.currentTime + END_GRACE_SEC) * 1000);
@@ -142,6 +154,10 @@ export function startTake(engine: AudioEngine, exercise: Exercise, bpm: number, 
     cleanup();
     if (cancelled) return null;
     if (micLost) throw new DOMException("microphone was interrupted during the take", "NotReadableError");
+    // 割り込みで AudioContext が止まると、マイクは開いたままフレームだけが途中で止まる。その分を「歌えていない」と記録しない
+    if (frames.length && frames[frames.length - 1].t < schedule.tEnd - TRUNCATED_SEC) {
+      throw new DOMException("recording stopped before the end of the take", "NotReadableError");
+    }
 
     const analysis = analyzeTake({
       frames,
@@ -156,7 +172,8 @@ export function startTake(engine: AudioEngine, exercise: Exercise, bpm: number, 
     const recording = pcmChunks.length
       ? { pcm: assemblePcm(pcmChunks, pcmRate, schedule.tCount, schedule.tEnd), rate: pcmRate }
       : null;
-    return { analysis, schedule, recording, gaps, rateCheck: engine.rateCheck };
+    const silentInput = frames.length > 0 && frames.every((f) => f.rmsDb <= DIGITAL_SILENCE_DB);
+    return { analysis, schedule, recording, gaps, rateCheck: engine.rateCheck, silentInput };
   })();
 
   return {
@@ -183,13 +200,31 @@ const LOOPBACK_COUNT = 4;
 const LOOPBACK_LEAD_SEC = 0.3;
 const LOOPBACK_TAIL_SEC = 0.6;
 
+let abortLoopback: (() => void) | null = null;
+/** 実行中のループバック試験をやめる（シートを閉じた・テイクを始めた）。結果は捨てられる */
+export function cancelLoopbackTest(): void {
+  abortLoopback?.();
+}
+
 /**
  * 440Hz・300ms の音を 0.8 秒おきに 4 回鳴らしてマイクで拾い、検出した高さと往復の遅れを求める。
- * マイクが開いている状態で呼ぶ。
+ * マイクが開いている状態で呼ぶ。途中でやめた・マイクが閉じたら AbortError で reject する。
  */
 export async function runLoopbackTest(engine: AudioEngine): Promise<LoopbackResult> {
   const ctx = engine.ensureContext();
+  cancelLoopbackTest();
   const takeId = engine.nextTakeId();
+  let aborted = false;
+  let wake: () => void = () => { /* 下で差し替える */ };
+  const abort = () => { aborted = true; wake(); };
+  abortLoopback = abort;
+  const unwatchMic = engine.onChange(() => { if (engine.micState !== "open") abort(); });
+  const sleep = (ms: number) => new Promise<void>((resolve) => {
+    if (aborted) { resolve(); return; }
+    const timer = setTimeout(resolve, ms);
+    wake = () => { clearTimeout(timer); resolve(); };
+  });
+  const checkAborted = () => { if (aborted) throw new DOMException("loopback test was cancelled", "AbortError"); };
   const chunks: { startTime: number; data: Float32Array }[] = [];
   let rate = 0;
   let onStopped: () => void = () => { /* 下で差し替える */ };
@@ -206,9 +241,11 @@ export async function runLoopbackTest(engine: AudioEngine): Promise<LoopbackResu
     const times = Array.from({ length: LOOPBACK_COUNT }, (_, k) => first + k * LOOPBACK_INTERVAL_SEC);
     for (const t of times) engine.testTone(group, t, LOOPBACK_TONE_HZ, LOOPBACK_TONE_SEC);
     const end = times[times.length - 1] + LOOPBACK_TONE_SEC + LOOPBACK_TAIL_SEC;
-    await new Promise((resolve) => setTimeout(resolve, (end - ctx.currentTime) * 1000 + 150));
+    await sleep((end - ctx.currentTime) * 1000 + 150);
     engine.post({ type: "stop", takeId });
-    await Promise.race([stopped, new Promise((resolve) => setTimeout(resolve, STOP_TIMEOUT_MS))]);
+    checkAborted();
+    await Promise.race([stopped, sleep(STOP_TIMEOUT_MS)]);
+    checkAborted();
     if (!chunks.length) {
       return { roundTripMs: null, perBeepMs: times.map(() => null), detectedHz: null, centsError: null, pitchAbnormal: false, unstable: false };
     }
@@ -218,5 +255,7 @@ export async function runLoopbackTest(engine: AudioEngine): Promise<LoopbackResu
   } finally {
     group.stop();
     unsubscribe();
+    unwatchMic();
+    if (abortLoopback === abort) abortLoopback = null;
   }
 }

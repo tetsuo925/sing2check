@@ -27,6 +27,9 @@ export interface RateCheck {
   ok: boolean;
 }
 
+/** マイクを開くとき、AudioContext の resume() を待つ上限 */
+const RESUME_TIMEOUT_MS = 1500;
+
 /** まとめて止められる再生の単位（テイク 1 回、「正解を聴く」1 回など） */
 export class PlayGroup {
   private voices: { sources: AudioScheduledSourceNode[]; gain: GainNode }[] = [];
@@ -37,6 +40,7 @@ export class PlayGroup {
   add(sources: AudioScheduledSourceNode[], gain: GainNode): void {
     if (this.stopped) {
       for (const s of sources) { try { s.stop(); } catch { /* 無視 */ } }
+      try { gain.disconnect(); } catch { /* 無視 */ }
       return;
     }
     const voice = { sources, gain };
@@ -54,10 +58,13 @@ export class PlayGroup {
     const now = this.ctx.currentTime;
     for (const v of this.voices) {
       try {
-        v.gain.gain.cancelScheduledValues(now);
-        v.gain.gain.setTargetAtTime(0, now, 0.006);
-        for (const s of v.sources) s.stop(now + 0.04);
+        // いまの値を保ったまま予約を消す（cancelScheduledValues だけだと、途中のランプが消えて値が跳ぶ）
+        const g = v.gain.gain as AudioParam & { cancelAndHoldAtTime?(t: number): AudioParam };
+        if (g.cancelAndHoldAtTime) g.cancelAndHoldAtTime(now);
+        else g.cancelScheduledValues(now);
+        g.setTargetAtTime(0, now, 0.006);
       } catch { /* 無視 */ }
+      for (const s of v.sources) { try { s.stop(now + 0.04); } catch { /* 無視 */ } }
     }
   }
 }
@@ -89,6 +96,9 @@ export class AudioEngine {
   private stream: MediaStream | null = null;
   private source: MediaStreamAudioSourceNode | null = null;
   private opening: Promise<void> | null = null;
+  /** openMic / closeMic のたびに進める。開いている途中に閉じられたことを知るため */
+  private micGen = 0;
+  private openingGen = 0;
   private listeners = new Set<Listener>();
   private changeListeners = new Set<() => void>();
   private ratePoints: { samples: number; frame: number; at: number }[] = [];
@@ -153,11 +163,19 @@ export class AudioEngine {
   openMic(): Promise<void> {
     const ctx = this.ensureContext();
     if (this.micState === "open" && this.stream?.getAudioTracks().some((t) => t.readyState === "live")) return Promise.resolve();
-    if (this.opening) return this.opening;
+    if (this.opening && this.openingGen === this.micGen) return this.opening;
     if (!navigator.mediaDevices?.getUserMedia) {
       return Promise.reject(new DOMException("mediaDevices is not available", "SecurityError"));
     }
     this.releaseMic();
+    const gen = ++this.micGen;
+    this.openingGen = gen;
+    /** 待っている間に閉じられた・別の openMic に置き換わったら、開いたストリームを捨てて抜ける */
+    const superseded = (stream: MediaStream | null) => {
+      if (gen === this.micGen) return;
+      if (stream) for (const t of stream.getTracks()) t.stop();
+      throw new DOMException("cancelled", "AbortError");
+    };
     this.micState = "opening";
     this.changed();
     // §16.1: 起動時 playback → マイクを開く直前 auto → getUserMedia → play-and-record → 止めたら playback
@@ -165,14 +183,21 @@ export class AudioEngine {
     const request = navigator.mediaDevices.getUserMedia({
       audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: 1 },
     });
-    this.opening = (async () => {
+    let opening: Promise<void> | null = null;
+    opening = (async () => {
       try {
         const stream = await request;
+        superseded(stream);
         setAudioSession("play-and-record");
         this.stream = stream;
         await this.loadWorklet(ctx);
-        if (this.stream !== stream) throw new DOMException("cancelled", "AbortError"); // 待っている間に閉じられた
-        if (ctx.state !== "running") await ctx.resume().catch(() => { /* 無視 */ });
+        superseded(null); // closeMic が先にストリームを止めている
+        // resume() は、割り込み中（interrupted）だと解決しないことがある。待ちすぎない
+        if (ctx.state !== "running") {
+          await Promise.race([ctx.resume().catch(() => { /* 無視 */ }), new Promise((resolve) => setTimeout(resolve, RESUME_TIMEOUT_MS))]);
+          superseded(null);
+          if ((ctx.state as string) !== "running") throw new DOMException("audio context is not running", "NotReadableError");
+        }
         const node = this.ensureNode(ctx);
         this.source = ctx.createMediaStreamSource(stream);
         this.source.connect(node);
@@ -190,21 +215,25 @@ export class AudioEngine {
         this.micState = "open";
         this.micEverOpened = true;
       } catch (e) {
-        this.releaseMic();
-        this.micState = "closed";
-        setAudioSession("playback");
+        if (gen === this.micGen) {
+          this.releaseMic();
+          this.micState = "closed";
+          setAudioSession("playback");
+        }
         throw e;
       } finally {
-        this.opening = null;
+        if (opening && this.opening === opening) this.opening = null;
         this.changed();
       }
     })();
-    return this.opening;
+    this.opening = opening;
+    return opening;
   }
 
   /** マイクを閉じる（バックグラウンドに回ったときなど）。次のタップで取り直す */
   closeMic(): void {
     if (this.micState === "closed" && !this.stream) return;
+    this.micGen++; // 開いている途中の openMic を無効にする
     this.releaseMic();
     this.micState = "closed";
     setAudioSession("playback");

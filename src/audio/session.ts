@@ -10,19 +10,31 @@ export function setAudioSession(type: AudioSessionType): void {
   try { session.type = type; } catch { /* 無視 */ }
 }
 
-interface WakeLockSentinelLike { release(): Promise<void> }
+interface WakeLockSentinelLike { release(): Promise<void>; addEventListener?(type: "release", fn: () => void): void }
 let lock: WakeLockSentinelLike | null = null;
+let wanted = false;
+let requesting = false;
 
-/** 録音中の画面消灯を防ぐ */
+/**
+ * 録音中の画面消灯を防ぐ。最後に呼ばれた on / off に合わせる
+ * （取得を待っている間に off になったら、取れた時点で放す。OS が放したら持っていない扱いに戻す）。
+ */
 export async function keepAwake(on: boolean): Promise<void> {
+  wanted = on;
   try {
     const wakeLock = (navigator as Navigator & { wakeLock?: { request(type: "screen"): Promise<WakeLockSentinelLike> } }).wakeLock;
-    if (on && wakeLock && !lock) lock = await wakeLock.request("screen");
-    if (!on && lock) {
-      const l = lock;
-      lock = null;
-      await l.release();
+    if (on) {
+      if (!wakeLock || lock || requesting) return;
+      requesting = true;
+      let got: WakeLockSentinelLike;
+      try { got = await wakeLock.request("screen"); } finally { requesting = false; }
+      got.addEventListener?.("release", () => { if (lock === got) lock = null; });
+      lock = got;
+      if (wanted) return;
     }
+    const held = lock;
+    lock = null;
+    if (held) await held.release();
   } catch { /* 無視 */ }
 }
 

@@ -5,7 +5,7 @@ import type { Frame } from "../../audio/dsp.ts";
 import { engine } from "../../audio/engine.ts";
 import type { LoopbackResult } from "../../audio/loopback.ts";
 import { TUNER_TAKE_ID, unpackFrames } from "../../audio/messages.ts";
-import { runLoopbackTest } from "../../audio/runTake.ts";
+import { cancelLoopbackTest, runLoopbackTest } from "../../audio/runTake.ts";
 import { signed } from "../../judge/stats.ts";
 import type { Settings } from "../../storage.ts";
 import { GATE_MAX_DB, GATE_MIN_DB, GATE_STEP_DB } from "../../storage.ts";
@@ -73,6 +73,9 @@ export function MicCheckSheet({ settings, onPatch, onClose }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [measuring, setMeasuring] = useState(false);
   const [loopback, setLoopback] = useState<LoopbackResult | null>(null);
+
+  // シートを閉じたら、測っている途中のループバック試験をやめる
+  useEffect(() => cancelLoopbackTest, []);
 
   // マイクが開いている間だけ解析する。閉じたら止める
   useEffect(() => {

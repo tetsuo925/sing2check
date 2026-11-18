@@ -58,6 +58,7 @@ button, select, input { font: inherit; color: inherit; }
   min-height: 0;
   overflow-y: auto;
   overflow-x: hidden;
+  scrollbar-gutter: stable;
   display: flex;
   flex-direction: column;
   gap: 14px;

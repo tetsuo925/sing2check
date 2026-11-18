@@ -194,7 +194,7 @@ export function App() {
       takeRef.current = null;
       setSchedule(null);
       if (!result) { setPhase("ready"); return; }
-      if (result.analysis.frameCount === 0) {
+      if (result.analysis.frameCount === 0 || result.silentInput) {
         setMicError("マイクから音が届きませんでした。「マイク」を開いて入力を確認してください。");
         setPhase("ready");
         return;

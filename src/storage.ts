@@ -162,7 +162,8 @@ export function saveState(s: PersistedState): boolean {
 export function loadTakes(): TakeRecord[] {
   const v = read(KEY_TAKES);
   if (!Array.isArray(v)) return [];
-  return v.filter((t): t is TakeRecord => isObject(t) && typeof t.date === "string" && typeof t.level === "number" && Array.isArray(t.notes)).slice(0, MAX_TAKES);
+  return v.filter((t): t is TakeRecord => isObject(t) && typeof t.date === "string" && typeof t.level === "number"
+    && Array.isArray(t.notes) && t.notes.every((n) => isObject(n) && typeof n.status === "string")).slice(0, MAX_TAKES);
 }
 
 export function saveTakes(takes: TakeRecord[]): boolean {

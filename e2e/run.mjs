@@ -12,7 +12,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright-core";
 import { makeExercise } from "../src/core/exercise.ts";
-import { scheduleTake } from "../src/judge/take.ts";
+import { MIC_SETTLE_SEC, scheduleTake } from "../src/judge/take.ts";
 import { renderTake, toWav16 } from "../test/helpers/synth.ts";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -23,7 +23,7 @@ const bpm = exercise.defaultTempo;
 // 「歌う」を押してから課題の 1 拍目までの時間（主和音 → 1 拍 → カウント）。
 // 偽のマイクは、ストリームを開いた時点から WAV の頭を流し始める。マイクが開いてから予約までの時間（数十 ms）は
 // 分からないので、WAV の 1 拍目を少し遅らせておく。ずれは判定の Δ 合わせ（−150〜+400ms）が吸収する。
-const LEAD_SEC = scheduleTake(0, exercise.melody, bpm, { chord: true }).t0 + 0.05;
+const LEAD_SEC = scheduleTake(0, exercise.melody, bpm, { chord: true }).t0 + MIC_SETTLE_SEC + 0.05;
 
 const SCENARIOS = [
   { name: "正確に歌う → 合格", singer: {}, expect: { passed: true, wrong: [], silent: [] } },

@@ -15,6 +15,8 @@ import { timingReliable } from "./stats.ts";
 export const CHORD_SEC = 2.65;
 /** 予約の余裕 */
 export const SCHEDULE_LEAD_SEC = 0.15;
+/** マイクを開いた直後のテイクは、これだけ遅らせて鳴らし始める（音の経路の切り替えが落ち着くのを待つ） */
+export const MIC_SETTLE_SEC = 0.4;
 /** 解析に使うフレームの範囲の前側（課題開始より前） */
 const ANALYZE_PRE_SEC = 0.5;
 /** 往復の遅れを測ってあるのに、クリックがこれ以上ずれて届いたら「測り直して」と出す */
