@@ -1,0 +1,55 @@
+/* デザイントークン（練習帳 SPEC.md §8 の写し）。方向: 五線紙と万年筆、添削の朱。
+   要素は必ずトークン経由で着色する。 */
+:root {
+  color-scheme: light;
+  --paper: #F4F5F1;
+  --surface: #FFFFFF;
+  --ink: #1A2230;
+  --ink-soft: #5A6475;
+  --line: #D5D9DE;
+  --accent: #2A4FA8;
+  --on-accent: #FFFFFF;
+  --ok: #1F8A5B;
+  --ng: #D0432B;
+  --warn: #B7791F;
+  /* シートの後ろの幕 */
+  --scrim: rgb(26 34 48 / 0.4);
+
+  --font-body: "Zen Kaku Gothic New", -apple-system, "Hiragino Sans", "Noto Sans JP", sans-serif;
+  --font-display: "Zen Old Mincho", "Hiragino Mincho ProN", "Yu Mincho", serif;
+  --gutter: 16px;
+  --radius: 6px;
+  --tap: 44px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --paper: #12161D;
+    --surface: #1B212B;
+    --ink: #E9ECEF;
+    --ink-soft: #9AA5B5;
+    --line: #2E3745;
+    --accent: #7FA2F5;
+    --on-accent: #0E1420;
+    --ok: #4CC38A;
+    --ng: #F0705A;
+    --warn: #E0B052;
+    --scrim: rgb(0 0 0 / 0.6);
+  }
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --paper: #12161D;
+  --surface: #1B212B;
+  --ink: #E9ECEF;
+  --ink-soft: #9AA5B5;
+  --line: #2E3745;
+  --accent: #7FA2F5;
+  --on-accent: #0E1420;
+  --ok: #4CC38A;
+  --ng: #F0705A;
+  --warn: #E0B052;
+  --scrim: rgb(0 0 0 / 0.6);
+}
